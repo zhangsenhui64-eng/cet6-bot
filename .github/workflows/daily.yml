@@ -2,9 +2,11 @@ name: Daily CET6 Push
 
 on:
   schedule:
-    # UTC 时间 00:05 触发，加上容器启动约3-5分钟，刚好在北京时间早上 08:08 ~ 08:10 送到你手机上！
     - cron: '5 0 * * *'
   workflow_dispatch:
+
+permissions:
+  contents: write
 
 jobs:
   send-task:
@@ -19,10 +21,11 @@ jobs:
           python-version: '3.11'
 
       - name: Install dependencies
-        run: pip install requests
+        run: pip install requests edge-tts gTTS
 
       - name: Run CET-6 AI Push Script
         env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           PUSHPLUS_TOKEN: ${{ secrets.PUSHPLUS_TOKEN }}
           EMAIL_SENDER: ${{ secrets.EMAIL_SENDER }}
