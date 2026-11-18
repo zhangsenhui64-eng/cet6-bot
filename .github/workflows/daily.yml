@@ -2,9 +2,9 @@ name: Daily CET6 Push
 
 on:
   schedule:
-    # 每天北京时间早上 07:50 自动运行（GitHub 使用 UTC 时间，23:50 UTC = 北京时间次日 07:50）
-    - cron: '50 23 * * *'
-  workflow_dispatch: # 允许你随时手动点击按钮测试推送
+    # UTC 时间 00:05 触发，加上容器启动约3-5分钟，刚好在北京时间早上 08:08 ~ 08:10 送到你手机上！
+    - cron: '5 0 * * *'
+  workflow_dispatch:
 
 jobs:
   send-task:
@@ -21,8 +21,9 @@ jobs:
       - name: Install dependencies
         run: pip install requests
 
-      - name: Run CET-6 Push Script
+      - name: Run CET-6 AI Push Script
         env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           PUSHPLUS_TOKEN: ${{ secrets.PUSHPLUS_TOKEN }}
           EMAIL_SENDER: ${{ secrets.EMAIL_SENDER }}
           EMAIL_PASSWORD: ${{ secrets.EMAIL_PASSWORD }}
