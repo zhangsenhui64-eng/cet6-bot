@@ -1,4 +1,5 @@
 import os
+import time
 import json
 import smtplib
 import datetime
@@ -11,10 +12,33 @@ from email.header import Header
 EXAM_DATE = datetime.date(2026, 12, 12)
 
 def call_gemini_ai(is_weekend, days_left, today_str):
-    """调用 Google Gemini (gemini-3.8-flash) 生成含听力、阅读、翻译、词汇的完整真题卷"""
+    """带【防503拥堵自动重试 + 多模型自动切换】的 Google AI 调用函数"""
     api_key = os.environ.get("GEMINI_API_KEY")
     if not api_key:
         return None
+
+    # 1. 优先使用 gemini-3.8-flash，并自动查询账号下其它可用的 gemini-3 系列模型作为空闲备选
+    models_to_try = ["gemini-3.8-flash"]
+    try:
+        m_res = requests.get(
+            f"https://generativelanguage.googleapis.com/v1beta/models?key={api_key}",
+            timeout=10
+        )
+        if m_res.status_code == 200:
+            for m in m_res.json().get("models", []):
+                name = m.get("name", "").replace("models/", "")
+                methods = m.get("supportedGenerationMethods", [])
+                if (
+                    "generateContent" in methods
+                    and "gemini-3" in name
+                    and not any(x in name for x in ["tts", "image", "embedding", "vision"])
+                ):
+                    if name not in models_to_try:
+                        models_to_try.append(name)
+    except Exception as e:
+        print(f"查询模型列表提示: {e}")
+
+    print("本次备选 AI 模型队列:", models_to_try)
 
     if is_weekend:
         prompt = f"""
@@ -60,9 +84,9 @@ def call_gemini_ai(is_weekend, days_left, today_str):
           "reading": {{
             "source": "六级仔细阅读真题精选（标明题材，如：科技与AI / 经济政策 / 环境生态 / 认知心理学）",
             "passage": "一段130-160词的六级仔细阅读真题核心段落（包含长难句与同义替换考点，可分1-2段）",
-            "q1": "第1道仔细阅读真题英文题干（细节题或推理题）",
+            "q1": "1. 第1道仔细阅读真题英文题干（细节题或推理题）",
             "q1_options": ["A) ...", "B) ...", "C) ...", "D) ..."],
-            "q2": "第2道仔细阅读真题英文题干（观点态度题或主旨/词义题）",
+            "q2": "2. 第2道仔细阅读真题英文题干（观点态度题或主旨/词义题）",
             "q2_options": ["A) ...", "B) ...", "C) ...", "D) ..."],
             "analysis": "【答案与同义替换精析】：分别解析第1题和第2题的正确答案，重点标出【正确选项是如何同义改写原文句子的】，并附上全文精准中文译文。"
           }},
@@ -75,7 +99,8 @@ def call_gemini_ai(is_weekend, days_left, today_str):
         }}
         """
 
-    for model in ["gemini-3.8-flash", "gemini-flash-latest"]:
+    # 2. 依次尝试可用模型；若遇到 503 拥堵，自动等待重试
+    for model in models_to_try[:4]:
         url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={api_key}"
         payload = {
             "contents": [{"parts": [{"text": prompt}]}],
@@ -84,20 +109,28 @@ def call_gemini_ai(is_weekend, days_left, today_str):
                 "responseMimeType": "application/json"
             }
         }
-        try:
-            res = requests.post(url, json=payload, timeout=60)
-            if res.status_code == 200:
-                text = res.json()["candidates"][0]["content"]["parts"][0]["text"]
-                text = text.replace("```json", "").replace("```", "").strip()
-                return json.loads(text)
-            else:
-                print(f"模型 {model} 返回状态码 {res.status_code}: {res.text}")
-        except Exception as e:
-            print(f"调用 {model} 异常: {e}")
+        for attempt in range(3):  # 每个模型最多排队重试 3 次
+            try:
+                res = requests.post(url, json=payload, timeout=60)
+                if res.status_code == 200:
+                    print(f"✅ 成功调用 Google AI 模型: {model} (第 {attempt + 1} 次尝试)！")
+                    text = res.json()["candidates"][0]["content"]["parts"][0]["text"]
+                    text = text.replace("```json", "").replace("```", "").strip()
+                    return json.loads(text)
+                elif res.status_code in (503, 429):
+                    wait_sec = (attempt + 1) * 6
+                    print(f"⏳ 模型 {model} 当前繁忙({res.status_code})，等待 {wait_sec} 秒后进行第 {attempt + 2} 次重试...")
+                    time.sleep(wait_sec)
+                else:
+                    print(f"模型 {model} 返回状态码 {res.status_code}: {res.text}")
+                    break
+            except Exception as e:
+                print(f"调用 {model} 异常: {e}")
+                time.sleep(4)
     return None
 
 def get_fallback_data(is_weekend, day_idx):
-    """内置完整真题库（即使网络波动也能推全套听力+阅读+翻译+词汇）"""
+    """内置完整真题库（极端断网情况下的全套兜底卷）"""
     return {
         "words": [
             {"word": "compromise /ˈkɒmprəmaɪz/", "meaning": "【真题熟词僻义】v. 损害，危及；妥协", "collocation": "compromise safety/quality（损害安全/质量，同义替换 jeopardize / undermine）"},
@@ -149,14 +182,14 @@ def render_html(data, is_weekend, days_left, today_str):
     # 1. 组装词汇 HTML
     words_html = "".join([
         f'<div style="margin-bottom:10px; padding-bottom:8px; border-bottom:1px dashed #e2e8f0;">'
-        f'<b style="color:#2b6cb0; font-size:1.05em;">• {w["word"]}</b><br>'
-        f'<span style="color:#c53030; font-weight:bold; font-size:0.92em;">{w["meaning"]}</span><br>'
-        f'<span style="color:#4a5568; font-size:0.88em;">👉 {w["collocation"]}</span></div>'
+        f'<b style="color:#2b6cb0; font-size:1.05em;">• {w.get("word", "")}</b><br>'
+        f'<span style="color:#c53030; font-weight:bold; font-size:0.92em;">{w.get("meaning", "")}</span><br>'
+        f'<span style="color:#4a5568; font-size:0.88em;">👉 {w.get("collocation", "")}</span></div>'
         for w in data.get("words", [])
     ])
 
-    # 2. 组装听力 HTML（含在线直接播放语音条！）
-    listen = data.get("listening", {})
+    # 2. 组装听力 HTML（含在线直接播放语音条）
+    listen = data.get("listening") or {}
     audio_text = urllib.parse.quote(listen.get("script", ""))
     audio_url = f"https://dict.youdao.com/dictvoice?type=2&audio={audio_text}"
     listen_opts = "<br>".join(listen.get("options", []))
@@ -178,7 +211,7 @@ def render_html(data, is_weekend, days_left, today_str):
     # 3. 组装阅读 HTML（工作日专属）
     reading_html = ""
     read = data.get("reading")
-    if read:
+    if read and isinstance(read, dict):
         q1_opts = "<br>".join(read.get("q1_options", []))
         q2_opts = "<br>".join(read.get("q2_options", []))
         reading_html = f"""
@@ -200,7 +233,7 @@ def render_html(data, is_weekend, days_left, today_str):
         """
 
     # 4. 组装翻译 HTML
-    trans = data.get("translation", {})
+    trans = data.get("translation") or {}
     sec_num = "二" if is_weekend else "三"
     word_num = "三" if is_weekend else "四"
     trans_html = f"""
@@ -242,8 +275,23 @@ def build_daily_message():
     days_left = (EXAM_DATE - today).days
 
     if days_left < 0:
-        print("2026年12月六级考试已结束，自动停止推送！")
+        print("🎉 2026年12月六级考试已结束，自动停止推送！")
         return None, None
+
+    if days_left == 0:
+        title = "🔥 今天六级开考！考前终极抢分锦囊 & 必过祝福"
+        html = """
+        <div style="font-family:sans-serif; line-height:1.6; padding:15px; background:#fffaf0; border:2px solid #dd6b20; border-radius:8px;">
+            <h2 style="color:#c05621; margin-top:0;">🎉 终于等到今天！祝你下午六级考的全会、蒙的全对！</h2>
+            <p><b>⏰ 下午入场前最后叮嘱：</b></p>
+            <ul>
+                <li>检查证件：<b>准考证、身份证、学生证、调频耳机（及备用电池）、2B铅笔、黑色签字笔</b>。</li>
+                <li><b>写作救急句：</b><code>It is universally acknowledged that...</code> / <code>Only by taking joint efforts can we...</code></li>
+                <li><b>听力口诀：</b>视听一致抓主干，听到 <code>but / however / actually / in fact</code> 立刻竖起耳朵，答案就在后面！</li>
+            </ul>
+        </div>
+        """
+        return title, html
 
     weekday_idx = today.weekday()
     is_weekend = weekday_idx in (5, 6)
