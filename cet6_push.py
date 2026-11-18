@@ -12,33 +12,19 @@ from email.header import Header
 EXAM_DATE = datetime.date(2026, 12, 12)
 
 def call_gemini_ai(is_weekend, days_left, today_str):
-    """带【防503拥堵自动重试 + 多模型自动切换】的 Google AI 调用函数"""
+    """高速版 Google AI 调用函数（优先使用秒通模型，遇503秒切备用模型）"""
     api_key = os.environ.get("GEMINI_API_KEY")
     if not api_key:
         return None
 
-    # 1. 优先使用 gemini-3.8-flash，并自动查询账号下其它可用的 gemini-3 系列模型作为空闲备选
-    models_to_try = ["gemini-3.8-flash"]
-    try:
-        m_res = requests.get(
-            f"https://generativelanguage.googleapis.com/v1beta/models?key={api_key}",
-            timeout=10
-        )
-        if m_res.status_code == 200:
-            for m in m_res.json().get("models", []):
-                name = m.get("name", "").replace("models/", "")
-                methods = m.get("supportedGenerationMethods", [])
-                if (
-                    "generateContent" in methods
-                    and "gemini-3" in name
-                    and not any(x in name for x in ["tts", "image", "embedding", "vision"])
-                ):
-                    if name not in models_to_try:
-                        models_to_try.append(name)
-    except Exception as e:
-        print(f"查询模型列表提示: {e}")
-
-    print("本次备选 AI 模型队列:", models_to_try)
+    # 把你账号下实测秒通的模型排在最前面，避免在拥堵模型上白等
+    models_to_try = [
+        "gemini-3-flash-preview",
+        "gemini-3.7-flash",
+        "gemini-3.6-flash",
+        "gemini-3.5-flash",
+        "gemini-3.8-flash"
+    ]
 
     if is_weekend:
         prompt = f"""
@@ -99,8 +85,8 @@ def call_gemini_ai(is_weekend, days_left, today_str):
         }}
         """
 
-    # 2. 依次尝试可用模型；若遇到 503 拥堵，自动等待重试
-    for model in models_to_try[:4]:
+    # 依次尝试模型，如果某个模型忙，立刻无缝切换到下一个模型，不浪费时间干等
+    for model in models_to_try:
         url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={api_key}"
         payload = {
             "contents": [{"parts": [{"text": prompt}]}],
@@ -109,24 +95,17 @@ def call_gemini_ai(is_weekend, days_left, today_str):
                 "responseMimeType": "application/json"
             }
         }
-        for attempt in range(3):  # 每个模型最多排队重试 3 次
-            try:
-                res = requests.post(url, json=payload, timeout=60)
-                if res.status_code == 200:
-                    print(f"✅ 成功调用 Google AI 模型: {model} (第 {attempt + 1} 次尝试)！")
-                    text = res.json()["candidates"][0]["content"]["parts"][0]["text"]
-                    text = text.replace("```json", "").replace("```", "").strip()
-                    return json.loads(text)
-                elif res.status_code in (503, 429):
-                    wait_sec = (attempt + 1) * 6
-                    print(f"⏳ 模型 {model} 当前繁忙({res.status_code})，等待 {wait_sec} 秒后进行第 {attempt + 2} 次重试...")
-                    time.sleep(wait_sec)
-                else:
-                    print(f"模型 {model} 返回状态码 {res.status_code}: {res.text}")
-                    break
-            except Exception as e:
-                print(f"调用 {model} 异常: {e}")
-                time.sleep(4)
+        try:
+            res = requests.post(url, json=payload, timeout=40)
+            if res.status_code == 200:
+                print(f"✅ 成功调用 Google AI 模型: {model}！")
+                text = res.json()["candidates"][0]["content"]["parts"][0]["text"]
+                text = text.replace("```json", "").replace("```", "").strip()
+                return json.loads(text)
+            else:
+                print(f"⏳ 模型 {model} 状态码 {res.status_code}，立即切换下一个模型...")
+        except Exception as e:
+            print(f"⏳ 模型 {model} 响应超时，立即切换下一个模型: {e}")
     return None
 
 def get_fallback_data(is_weekend, day_idx):
@@ -179,7 +158,6 @@ def render_html(data, is_weekend, days_left, today_str):
     mode_tag = "☕ 周末5分钟减负卷" if is_weekend else "📘 工作日真题随身卷"
     header_bg = "linear-gradient(135deg, #38a169, #276749)" if is_weekend else "linear-gradient(135deg, #2b6cb0, #1a365d)"
 
-    # 1. 组装词汇 HTML
     words_html = "".join([
         f'<div style="margin-bottom:10px; padding-bottom:8px; border-bottom:1px dashed #e2e8f0;">'
         f'<b style="color:#2b6cb0; font-size:1.05em;">• {w.get("word", "")}</b><br>'
@@ -188,7 +166,6 @@ def render_html(data, is_weekend, days_left, today_str):
         for w in data.get("words", [])
     ])
 
-    # 2. 组装听力 HTML（含在线直接播放语音条）
     listen = data.get("listening") or {}
     audio_text = urllib.parse.quote(listen.get("script", ""))
     audio_url = f"https://dict.youdao.com/dictvoice?type=2&audio={audio_text}"
@@ -208,7 +185,6 @@ def render_html(data, is_weekend, days_left, today_str):
     </div>
     """
 
-    # 3. 组装阅读 HTML（工作日专属）
     reading_html = ""
     read = data.get("reading")
     if read and isinstance(read, dict):
@@ -232,7 +208,6 @@ def render_html(data, is_weekend, days_left, today_str):
         </div>
         """
 
-    # 4. 组装翻译 HTML
     trans = data.get("translation") or {}
     sec_num = "二" if is_weekend else "三"
     word_num = "三" if is_weekend else "四"
@@ -315,20 +290,29 @@ def push_wechat(title, html):
     print("微信推送结果:", res.text)
 
 def push_email(title, html):
-    sender = os.environ.get("EMAIL_SENDER")
-    password = os.environ.get("EMAIL_PASSWORD")
-    receiver = os.environ.get("EMAIL_RECEIVER") or sender
+    sender = (os.environ.get("EMAIL_SENDER") or "").strip()
+    password = (os.environ.get("EMAIL_PASSWORD") or "").strip().replace(" ", "")
+    receiver = (os.environ.get("EMAIL_RECEIVER") or sender).strip()
     smtp_server = os.environ.get("SMTP_SERVER", "smtp.qq.com")
     if not (sender and password):
         return
-    msg = MIMEText(html, "html", "utf-8")
-    msg["From"] = Header(f"六级AI督学 <{sender}>", "utf-8")
-    msg["To"] = Header(receiver, "utf-8")
-    msg["Subject"] = Header(title, "utf-8")
-    with smtplib.SMTP_SSL(smtp_server, 465) as server:
+    try:
+        msg = MIMEText(html, "html", "utf-8")
+        # 严格遵循 QQ 邮箱 RFC5322 标准协议格式
+        msg["From"] = sender
+        msg["To"] = receiver
+        msg["Subject"] = Header(title, "utf-8")
+
+        server = smtplib.SMTP_SSL(smtp_server, 465, timeout=20)
         server.login(sender, password)
         server.sendmail(sender, [receiver], msg.as_string())
-    print("邮箱推送成功！")
+        try:
+            server.quit()
+        except Exception:
+            pass
+        print("🎉 邮箱推送成功！")
+    except Exception as e:
+        print(f"❌ 邮箱推送失败，具体原因: {e}")
 
 if __name__ == "__main__":
     title, html = build_daily_message()
