@@ -1,4 +1,5 @@
 import os
+import re
 import time
 import json
 import smtplib
@@ -11,13 +12,38 @@ from email.header import Header
 # 2026年下半年六级考试日期：2026年12月12日（考完次日自动停止推送）
 EXAM_DATE = datetime.date(2026, 12, 12)
 
+def split_script_for_tts(script, max_chars=145):
+    """将听力段落按自然句切分为不超过 145 字符的片段，100% 避开有道 TTS 200字符上限报错"""
+    clean_text = script.replace("\n", " ").replace('"', "").strip()
+    raw_sentences = re.split(r'(?<=[.!?])\s+', clean_text)
+    chunks = []
+    for sent in raw_sentences:
+        sent = sent.strip()
+        if not sent:
+            continue
+        if len(sent) <= max_chars:
+            chunks.append(sent)
+        else:
+            # 若单句过长，按逗号或分号拆成上下半句
+            sub_parts = re.split(r'(?<=[,;])\s+', sent)
+            cur = ""
+            for sp in sub_parts:
+                if len(cur) + len(sp) + 1 <= max_chars:
+                    cur = f"{cur} {sp}".strip()
+                else:
+                    if cur:
+                        chunks.append(cur)
+                    cur = sp
+            if cur:
+                chunks.append(cur)
+    return chunks if chunks else [clean_text[:145]]
+
 def call_gemini_ai(is_weekend, days_left, today_str):
     """高速版 Google AI 调用函数（优先使用秒通模型，遇503秒切备用模型）"""
     api_key = os.environ.get("GEMINI_API_KEY")
     if not api_key:
         return None
 
-    # 把你账号下实测秒通的模型排在最前面，避免在拥堵模型上白等
     models_to_try = [
         "gemini-3-flash-preview",
         "gemini-3.7-flash",
@@ -36,7 +62,7 @@ def call_gemini_ai(is_weekend, days_left, today_str):
             {{"word": "单词 /音标/", "meaning": "【真题高频】常考词义", "collocation": "真题搭配与同义替换"}}
           ],
           "listening": {{
-            "script": "一段40-55词的六级真题听力短文或对话节选（纯英文，中间包含 but 或 however 等转折考点，不要出现换行符）",
+            "script": "一段由2到3个简短句子组成的六级真题听力节选（总词数35-45词，每句话不超过18个词，中间包含 but 或 however 等转折考点，不要换行）",
             "question": "针对上述听力内容的1道六级标准英文设问？",
             "options": ["A) 选项A", "B) 选项B", "C) 选项C", "D) 选项D"],
             "analysis": "正确答案及解析（指出听力原文中哪个转折词或信号词引出了答案，并附原文中文翻译）"
@@ -62,10 +88,10 @@ def call_gemini_ai(is_weekend, days_left, today_str):
             {{"word": "单词3 /音标/", "meaning": "【真题熟词僻义/高频】词义", "collocation": "真题搭配及同义替换词"}}
           ],
           "listening": {{
-            "script": "一段60-75词的六级真题听力讲座(Section C)或长对话核心节选（纯英文，必须包含六级典型的转折/因果出题信号词如 however, actually, what matters is 等，单段落无换行）",
-            "question": "What does the speaker mainly talk about / imply ...? (1道标准六级听力英文提问)",
+            "script": "一段由3个清晰句子组成的六级真题听力短文或对话节选（总词数45-55词，每句话控制在15-18个词以内以便语音合成，必须包含 however, actually, in fact 等六级转折出题信号词，单段落无换行）",
+            "question": "What does the speaker mainly imply / talk about ...? (1道标准六级听力英文提问)",
             "options": ["A) ...", "B) ...", "C) ...", "D) ..."],
-            "analysis": "【正确答案】及【听音关键点】：指出原文哪句话、哪个信号词对应正确选项，并提供听力原文的中文译文。"
+            "analysis": "【正确答案】及【听音关键点】：指出原文第几句、哪个信号词对应正确选项，并提供听力原文的中文译文。"
           }},
           "reading": {{
             "source": "六级仔细阅读真题精选（标明题材，如：科技与AI / 经济政策 / 环境生态 / 认知心理学）",
@@ -85,7 +111,6 @@ def call_gemini_ai(is_weekend, days_left, today_str):
         }}
         """
 
-    # 依次尝试模型，如果某个模型忙，立刻无缝切换到下一个模型，不浪费时间干等
     for model in models_to_try:
         url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={api_key}"
         payload = {
@@ -117,15 +142,15 @@ def get_fallback_data(is_weekend, day_idx):
             {"word": "alleviate /əˈliːvieɪt/", "meaning": "【真题核心】v. 减轻，缓和（痛苦、贫困等）", "collocation": "alleviate poverty（缓解贫困，反义考点：aggravate / exacerbate 加剧）"}
         ],
         "listening": {
-            "script": "Many people assume that working longer hours naturally leads to higher productivity. However, recent empirical studies conducted across several European countries reveal the exact opposite. Once employees exceed forty-five hours a week, their efficiency drops sharply due to mental fatigue, and they are far more likely to make costly mistakes.",
+            "script": "Many people assume that working longer hours leads to higher productivity. However, recent studies across European countries reveal the exact opposite. Once employees exceed forty-five hours a week, their efficiency drops sharply due to mental fatigue.",
             "question": "What do recent studies reveal about working longer hours?",
             "options": [
                 "A) It significantly boosts a company's overall profit.",
-                "B) It actually reduces efficiency and increases errors.",
+                "B) It actually reduces efficiency due to mental fatigue.",
                 "C) It is widely welcomed by European employers.",
                 "D) It helps employees develop stronger mental endurance."
             ],
-            "analysis": "<b>【正确答案】B</b><br><b>【听音关键点】</b>注意听转折信号词 <code>However</code> 后面的核心句：<code>reveal the exact opposite... their efficiency drops sharply... make costly mistakes</code>（效率急剧下降、更容易犯错），B项中 <code>reduces efficiency</code> 同义替换原文 <code>efficiency drops</code>。<br><b>【原文译文】</b>许多人认为延长工作时间自然会提高生产力。然而，近期在几个欧洲国家开展的实证研究却揭示了完全相反的结果。一旦员工每周工作超过45小时，由于精神疲劳，他们的效率会急剧下降，而且更有可能犯下代价高昂的错误。"
+            "analysis": "<b>【正确答案】B</b><br><b>【听音关键点】</b>注意听第2句开头转折信号词 <code>However</code> 以及第3句核心结果：<code>their efficiency drops sharply due to mental fatigue</code>（由于精神疲劳，效率急剧下降），B项中 <code>reduces efficiency</code> 同义替换原文 <code>efficiency drops</code>。<br><b>【原文译文】</b>许多人认为延长工作时间会提高生产力。然而，近期在欧洲多国开展的研究却揭示了完全相反的结果。一旦员工每周工作超过45小时，由于精神疲劳，他们的效率就会急剧下降。"
         },
         "reading": None if is_weekend else {
             "source": "六级仔细阅读真题精选（人工智能与教育）",
@@ -158,33 +183,56 @@ def render_html(data, is_weekend, days_left, today_str):
     mode_tag = "☕ 周末5分钟减负卷" if is_weekend else "📘 工作日真题随身卷"
     header_bg = "linear-gradient(135deg, #38a169, #276749)" if is_weekend else "linear-gradient(135deg, #2b6cb0, #1a365d)"
 
-    words_html = "".join([
-        f'<div style="margin-bottom:10px; padding-bottom:8px; border-bottom:1px dashed #e2e8f0;">'
-        f'<b style="color:#2b6cb0; font-size:1.05em;">• {w.get("word", "")}</b><br>'
-        f'<span style="color:#c53030; font-weight:bold; font-size:0.92em;">{w.get("meaning", "")}</span><br>'
-        f'<span style="color:#4a5568; font-size:0.88em;">👉 {w.get("collocation", "")}</span></div>'
-        for w in data.get("words", [])
-    ])
+    # 1. 组装词汇 HTML（每个单词带点击发音按钮）
+    words_list = []
+    for w in data.get("words", []):
+        raw_word_str = w.get("word", "")
+        pure_word = raw_word_str.split("/")[0].strip()
+        word_tts_url = f"https://dict.youdao.com/dictvoice?type=2&audio={urllib.parse.quote(pure_word)}"
+        words_list.append(
+            f'<div style="margin-bottom:10px; padding-bottom:8px; border-bottom:1px dashed #e2e8f0;">'
+            f'<b style="color:#2b6cb0; font-size:1.05em;">• {raw_word_str}</b> '
+            f'<a href="{word_tts_url}" target="_blank" rel="noreferrer" style="display:inline-block; background:#ebf8ff; color:#2b6cb0; border:1px solid #90cdf4; padding:1px 8px; border-radius:12px; font-size:0.8em; text-decoration:none; margin-left:4px;">🔊 听发音</a><br>'
+            f'<span style="color:#c53030; font-weight:bold; font-size:0.92em;">{w.get("meaning", "")}</span><br>'
+            f'<span style="color:#4a5568; font-size:0.88em;">👉 {w.get("collocation", "")}</span></div>'
+        )
+    words_html = "".join(words_list)
 
+    # 2. 组装分句听力 HTML（彻底解决200字符上限 & 兼容微信/QQ邮箱双端点击发声）
     listen = data.get("listening") or {}
-    audio_text = urllib.parse.quote(listen.get("script", ""))
-    audio_url = f"https://dict.youdao.com/dictvoice?type=2&audio={audio_text}"
+    script_text = listen.get("script", "")
+    audio_chunks = split_script_for_tts(script_text, max_chars=145)
+
+    audio_players_html = ""
+    for idx, chunk in enumerate(audio_chunks, 1):
+        chunk_url = f"https://dict.youdao.com/dictvoice?type=2&audio={urllib.parse.quote(chunk)}"
+        audio_players_html += f"""
+        <div style="background:#ffffff; padding:8px 10px; border-radius:6px; border:1px solid #bee3f8; margin-bottom:8px;">
+            <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:4px;">
+                <span style="font-size:0.85em; font-weight:bold; color:#2c5282;">🎵 听力第 {idx}/{len(audio_chunks)} 句</span>
+                <a href="{chunk_url}" target="_blank" rel="noreferrer" style="background:#3182ce; color:#ffffff; padding:4px 12px; border-radius:14px; font-size:0.84em; font-weight:bold; text-decoration:none;">🔊 点击直接播放第 {idx} 句</a>
+            </div>
+            <audio controls preload="none" style="width:100%; height:32px;" src="{chunk_url}"></audio>
+        </div>
+        """
+
     listen_opts = "<br>".join(listen.get("options", []))
     listening_html = f"""
-    <h3 style="color:#2b6cb0; border-left:4px solid #2b6cb0; padding-left:8px; margin:18px 0 8px 0;">🎧 一、真题听力盲听实战（点下方播放直接听）</h3>
+    <h3 style="color:#2b6cb0; border-left:4px solid #2b6cb0; padding-left:8px; margin:18px 0 8px 0;">🎧 一、真题听力盲听实战（按句依次点播）</h3>
     <div style="background:#f0f9ff; padding:12px; border-radius:8px; border:1px solid #bee3f8;">
-        <p style="margin:0 0 8px 0; font-size:0.88em; color:#2c5282;">👇 <b>第一步：点击播放音频盲听（美音朗读，请勿先看原文）</b></p>
-        <audio controls preload="none" style="width:100%; height:38px; margin-bottom:10px;" src="{audio_url}">你的环境不支持直接播放，请点击下方展开看原文</audio>
-        <p style="margin:6px 0; font-weight:bold; color:#1a202c;">❓ {listen.get("question", "")}</p>
+        <p style="margin:0 0 8px 0; font-size:0.85em; color:#2c5282;">💡 <b>操作提示：</b>依次点击下方<b>蓝色【🔊 点击直接播放】按钮</b>或进度条播放键听完 {len(audio_chunks)} 句话（若在QQ邮箱中灰色条按不动，请直接点蓝色按钮即可发声！）</p>
+        {audio_players_html}
+        <p style="margin:10px 0 6px 0; font-weight:bold; color:#1a202c;">❓ {listen.get("question", "")}</p>
         <p style="margin:6px 0 12px 0; font-size:0.95em; line-height:1.7;">{listen_opts}</p>
         <details style="cursor:pointer; background:#ffffff; padding:8px 10px; border-radius:6px; border:1px solid #cbd5e0;">
             <summary style="color:#2b6cb0; font-weight:bold;">👉 选好答案后，点击展开【听力原文 & 答案精析】</summary>
-            <p style="margin:8px 0; font-size:0.92em; color:#2d3748;"><b>🎙️ 听力原文：</b>{listen.get("script", "")}</p>
+            <p style="margin:8px 0; font-size:0.92em; color:#2d3748;"><b>🎙️ 听力原文：</b>{script_text}</p>
             <p style="margin:6px 0 0 0; font-size:0.92em; color:#2f855a;">{listen.get("analysis", "")}</p>
         </details>
     </div>
     """
 
+    # 3. 组装阅读 HTML
     reading_html = ""
     read = data.get("reading")
     if read and isinstance(read, dict):
@@ -208,6 +256,7 @@ def render_html(data, is_weekend, days_left, today_str):
         </div>
         """
 
+    # 4. 组装翻译 HTML
     trans = data.get("translation") or {}
     sec_num = "二" if is_weekend else "三"
     word_num = "三" if is_weekend else "四"
@@ -298,7 +347,6 @@ def push_email(title, html):
         return
     try:
         msg = MIMEText(html, "html", "utf-8")
-        # 严格遵循 QQ 邮箱 RFC5322 标准协议格式
         msg["From"] = sender
         msg["To"] = receiver
         msg["Subject"] = Header(title, "utf-8")
