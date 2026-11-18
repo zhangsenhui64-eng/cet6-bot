@@ -12,31 +12,16 @@ from email.header import Header
 # 2026年下半年六级考试日期：2026年12月12日（考完次日自动停止推送）
 EXAM_DATE = datetime.date(2026, 12, 12)
 
-def split_script_for_tts(script, max_chars=145):
-    """将听力段落按自然句切分为不超过 145 字符的片段，100% 避开有道 TTS 200字符上限报错"""
-    clean_text = script.replace("\n", " ").replace('"', "").strip()
-    raw_sentences = re.split(r'(?<=[.!?])\s+', clean_text)
-    chunks = []
-    for sent in raw_sentences:
-        sent = sent.strip()
-        if not sent:
-            continue
-        if len(sent) <= max_chars:
-            chunks.append(sent)
-        else:
-            # 若单句过长，按逗号或分号拆成上下半句
-            sub_parts = re.split(r'(?<=[,;])\s+', sent)
-            cur = ""
-            for sp in sub_parts:
-                if len(cur) + len(sp) + 1 <= max_chars:
-                    cur = f"{cur} {sp}".strip()
-                else:
-                    if cur:
-                        chunks.append(cur)
-                    cur = sp
-            if cur:
-                chunks.append(cur)
-    return chunks if chunks else [clean_text[:145]]
+def clean_for_tts(text):
+    """清理特殊引号与换行符，确保句子语音接口 100% 正常合成"""
+    text = text.replace("\n", " ").replace('"', "").replace("“", "").replace("”", "").replace("’", "'")
+    return re.sub(r"\s+", " ", text).strip()
+
+def split_sentences(script):
+    """按句号、问号、感叹号切分自然句，供分句复盘精听使用"""
+    clean_text = clean_for_tts(script)
+    sents = [s.strip() for s in re.split(r'(?<=[.!?])\s+', clean_text) if s.strip()]
+    return sents if sents else [clean_text]
 
 def call_gemini_ai(is_weekend, days_left, today_str):
     """高速版 Google AI 调用函数（优先使用秒通模型，遇503秒切备用模型）"""
@@ -62,7 +47,7 @@ def call_gemini_ai(is_weekend, days_left, today_str):
             {{"word": "单词 /音标/", "meaning": "【真题高频】常考词义", "collocation": "真题搭配与同义替换"}}
           ],
           "listening": {{
-            "script": "一段由2到3个简短句子组成的六级真题听力节选（总词数35-45词，每句话不超过18个词，中间包含 but 或 however 等转折考点，不要换行）",
+            "script": "一段由2到3个简短句子组成的六级真题听力节选（总词数40-50词，中间包含 but 或 however 等转折考点，不要换行）",
             "question": "针对上述听力内容的1道六级标准英文设问？",
             "options": ["A) 选项A", "B) 选项B", "C) 选项C", "D) 选项D"],
             "analysis": "正确答案及解析（指出听力原文中哪个转折词或信号词引出了答案，并附原文中文翻译）"
@@ -88,10 +73,10 @@ def call_gemini_ai(is_weekend, days_left, today_str):
             {{"word": "单词3 /音标/", "meaning": "【真题熟词僻义/高频】词义", "collocation": "真题搭配及同义替换词"}}
           ],
           "listening": {{
-            "script": "一段由3个清晰句子组成的六级真题听力短文或对话节选（总词数45-55词，每句话控制在15-18个词以内以便语音合成，必须包含 however, actually, in fact 等六级转折出题信号词，单段落无换行）",
+            "script": "一段由3个清晰句子组成的六级真题听力短文或对话节选（总词数50-65词，必须包含 however, actually, in fact 等六级转折出题信号词，单段落无换行）",
             "question": "What does the speaker mainly imply / talk about ...? (1道标准六级听力英文提问)",
             "options": ["A) ...", "B) ...", "C) ...", "D) ..."],
-            "analysis": "【正确答案】及【听音关键点】：指出原文第几句、哪个信号词对应正确选项，并提供听力原文的中文译文。"
+            "analysis": "【正确答案】及【听音关键点】：指出原文哪句话、哪个信号词对应正确选项，并提供听力原文的中文译文。"
           }},
           "reading": {{
             "source": "六级仔细阅读真题精选（标明题材，如：科技与AI / 经济政策 / 环境生态 / 认知心理学）",
@@ -183,45 +168,57 @@ def render_html(data, is_weekend, days_left, today_str):
     mode_tag = "☕ 周末5分钟减负卷" if is_weekend else "📘 工作日真题随身卷"
     header_bg = "linear-gradient(135deg, #38a169, #276749)" if is_weekend else "linear-gradient(135deg, #2b6cb0, #1a365d)"
 
-    # 1. 组装词汇 HTML（每个单词带点击发音按钮）
+    # 1. 组装词汇 HTML（改为页内直接播放的 <audio> 控件，绝不跳转新网页！）
     words_list = []
     for w in data.get("words", []):
         raw_word_str = w.get("word", "")
         pure_word = raw_word_str.split("/")[0].strip()
         word_tts_url = f"https://dict.youdao.com/dictvoice?type=2&audio={urllib.parse.quote(pure_word)}"
         words_list.append(
-            f'<div style="margin-bottom:10px; padding-bottom:8px; border-bottom:1px dashed #e2e8f0;">'
-            f'<b style="color:#2b6cb0; font-size:1.05em;">• {raw_word_str}</b> '
-            f'<a href="{word_tts_url}" target="_blank" rel="noreferrer" style="display:inline-block; background:#ebf8ff; color:#2b6cb0; border:1px solid #90cdf4; padding:1px 8px; border-radius:12px; font-size:0.8em; text-decoration:none; margin-left:4px;">🔊 听发音</a><br>'
+            f'<div style="margin-bottom:12px; padding-bottom:10px; border-bottom:1px dashed #e2e8f0;">'
+            f'<div style="margin-bottom:4px;"><b style="color:#2b6cb0; font-size:1.05em;">• {raw_word_str}</b></div>'
+            f'<audio controls preload="none" style="width:100%; max-width:260px; height:30px; margin:2px 0 4px 0;" src="{word_tts_url}"></audio><br>'
             f'<span style="color:#c53030; font-weight:bold; font-size:0.92em;">{w.get("meaning", "")}</span><br>'
             f'<span style="color:#4a5568; font-size:0.88em;">👉 {w.get("collocation", "")}</span></div>'
         )
     words_html = "".join(words_list)
 
-    # 2. 组装分句听力 HTML（彻底解决200字符上限 & 兼容微信/QQ邮箱双端点击发声）
+    # 2. 组装听力 HTML（使用专门支持长句子的【有道句子TTS】+【搜狗句子TTS】双引擎页内播放条！）
     listen = data.get("listening") or {}
-    script_text = listen.get("script", "")
-    audio_chunks = split_script_for_tts(script_text, max_chars=145)
+    script_text = clean_for_tts(listen.get("script", ""))
+    full_encoded = urllib.parse.quote(script_text)
 
-    audio_players_html = ""
-    for idx, chunk in enumerate(audio_chunks, 1):
-        chunk_url = f"https://dict.youdao.com/dictvoice?type=2&audio={urllib.parse.quote(chunk)}"
-        audio_players_html += f"""
-        <div style="background:#ffffff; padding:8px 10px; border-radius:6px; border:1px solid #bee3f8; margin-bottom:8px;">
-            <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:4px;">
-                <span style="font-size:0.85em; font-weight:bold; color:#2c5282;">🎵 听力第 {idx}/{len(audio_chunks)} 句</span>
-                <a href="{chunk_url}" target="_blank" rel="noreferrer" style="background:#3182ce; color:#ffffff; padding:4px 12px; border-radius:14px; font-size:0.84em; font-weight:bold; text-decoration:none;">🔊 点击直接播放第 {idx} 句</a>
-            </div>
-            <audio controls preload="none" style="width:100%; height:32px;" src="{chunk_url}"></audio>
+    # 专门支持整段长句朗读的两个国内大厂 HTTPS 语音接口
+    youdao_sent_url = f"https://tts.youdao.com/fanyivoice?word={full_encoded}&le=en&keyfrom=speaker-target"
+    sogou_sent_url = f"https://fanyi.sogou.com/reventondc/synthesis?text={full_encoded}&speed=1&lang=en&from=translateweb&speaker=6"
+
+    # 同时生成分句精听播放条（折叠起来，方便单句重听）
+    sentences = split_sentences(script_text)
+    sent_bars_html = ""
+    for idx, sent in enumerate(sentences, 1):
+        s_enc = urllib.parse.quote(sent)
+        s_url = f"https://tts.youdao.com/fanyivoice?word={s_enc}&le=en&keyfrom=speaker-target"
+        sent_bars_html += f"""
+        <div style="margin-top:6px;">
+            <span style="font-size:0.82em; color:#4a5568;">第 {idx} 句：</span>
+            <audio controls preload="none" style="width:100%; height:30px;" src="{s_url}"></audio>
         </div>
         """
 
     listen_opts = "<br>".join(listen.get("options", []))
     listening_html = f"""
-    <h3 style="color:#2b6cb0; border-left:4px solid #2b6cb0; padding-left:8px; margin:18px 0 8px 0;">🎧 一、真题听力盲听实战（按句依次点播）</h3>
+    <h3 style="color:#2b6cb0; border-left:4px solid #2b6cb0; padding-left:8px; margin:18px 0 8px 0;">🎧 一、真题听力盲听实战（页内直接播放）</h3>
     <div style="background:#f0f9ff; padding:12px; border-radius:8px; border:1px solid #bee3f8;">
-        <p style="margin:0 0 8px 0; font-size:0.85em; color:#2c5282;">💡 <b>操作提示：</b>依次点击下方<b>蓝色【🔊 点击直接播放】按钮</b>或进度条播放键听完 {len(audio_chunks)} 句话（若在QQ邮箱中灰色条按不动，请直接点蓝色按钮即可发声！）</p>
-        {audio_players_html}
+        <div style="background:#ffffff; padding:10px; border-radius:6px; border:1px solid #bee3f8; margin-bottom:10px;">
+            <p style="margin:0 0 4px 0; font-size:0.86em; font-weight:bold; color:#2b6cb0;">🔊 音源一（有道美音·整段连播，点 ▶ 直接听）：</p>
+            <audio controls preload="none" style="width:100%; height:36px; margin-bottom:8px;" src="{youdao_sent_url}"></audio>
+            <p style="margin:0 0 4px 0; font-size:0.84em; color:#4a5568;">🔊 音源二（搜狗外教·备用整段连播）：</p>
+            <audio controls preload="none" style="width:100%; height:34px;" src="{sogou_sent_url}"></audio>
+            <details style="margin-top:8px; cursor:pointer;">
+                <summary style="font-size:0.84em; color:#3182ce;">👉 某一句没听清？点击展开【逐句单独播放条】</summary>
+                {sent_bars_html}
+            </details>
+        </div>
         <p style="margin:10px 0 6px 0; font-weight:bold; color:#1a202c;">❓ {listen.get("question", "")}</p>
         <p style="margin:6px 0 12px 0; font-size:0.95em; line-height:1.7;">{listen_opts}</p>
         <details style="cursor:pointer; background:#ffffff; padding:8px 10px; border-radius:6px; border:1px solid #cbd5e0;">
@@ -274,6 +271,7 @@ def render_html(data, is_weekend, days_left, today_str):
     """
 
     html = f"""
+    <meta name="referrer" content="no-referrer">
     <div style="font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif; line-height:1.6; color:#2d3748; max-width:650px;">
         <div style="background:{header_bg}; color:white; padding:14px 16px; border-radius:8px; margin-bottom:14px;">
             <h2 style="margin:0; font-size:1.18em;">🎯 {mode_tag} | 距六级仅剩 <span style="color:#fbd38d; font-size:1.25em;">{days_left}</span> 天</h2>
