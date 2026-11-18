@@ -51,7 +51,7 @@ def call_gemini_ai(is_weekend, days_left, today_str):
         """
 
     # 优先调用 gemini-2.5-flash，备用 gemini-2.0-flash
-    for model in ["gemini-2.5-flash", "gemini-2.0-flash"]:
+    for model in ["gemini-3.8-flash", "gemini-flash-latest"]:
         url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={api_key}"
         payload = {
             "contents": [{"parts": [{"text": prompt}]}],
