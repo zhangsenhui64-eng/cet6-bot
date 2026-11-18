@@ -1,0 +1,30 @@
+name: Daily CET6 Push
+
+on:
+  schedule:
+    # 每天北京时间早上 07:50 自动运行（GitHub 使用 UTC 时间，23:50 UTC = 北京时间次日 07:50）
+    - cron: '50 23 * * *'
+  workflow_dispatch: # 允许你随时手动点击按钮测试推送
+
+jobs:
+  send-task:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: pip install requests
+
+      - name: Run CET-6 Push Script
+        env:
+          PUSHPLUS_TOKEN: ${{ secrets.PUSHPLUS_TOKEN }}
+          EMAIL_SENDER: ${{ secrets.EMAIL_SENDER }}
+          EMAIL_PASSWORD: ${{ secrets.EMAIL_PASSWORD }}
+          EMAIL_RECEIVER: ${{ secrets.EMAIL_RECEIVER }}
+        run: python cet6_push.py
